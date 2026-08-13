@@ -132,12 +132,29 @@ if search.strip():
     else:
         st.sidebar.success(f"Found {len(search_matches)} match(es) — map centered on result.")
 
+# Build a label for each row so it can be picked from a dropdown
+def make_label(row):
+    return f"{row['Customer Name']} — {row['Farm Name']}" if row["Farm Name"] else row["Customer Name"]
+
+area_options = ["-- All areas --"] + [make_label(r) for _, r in df.iterrows()]
+selected_area = st.sidebar.selectbox("Select area", area_options)
+
+selected_match = pd.DataFrame()
+if selected_area != "-- All areas --":
+    labels = df.apply(make_label, axis=1)
+    selected_match = df[labels == selected_area]
+
 st.sidebar.caption(f"Showing {len(filtered)} of {len(df)} farms")
 
 # ============================================================
 # BUILD MAP
 # ============================================================
-focus_df = search_matches if not search_matches.empty else filtered
+if not selected_match.empty:
+    focus_df = selected_match
+elif not search_matches.empty:
+    focus_df = search_matches
+else:
+    focus_df = filtered
 
 if not focus_df.empty:
     center_lat = focus_df["lat"].mean()
@@ -216,10 +233,8 @@ for _, row in filtered.iterrows():
             direction="bottom",
             offset=(0, 12),
             style=(
-                "font-size:13px; font-weight:600; padding:2px 6px; "
-                "white-space:nowrap; background:white; "
-                "border:1px solid #999; border-radius:4px; "
-                "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
+                "font-size:13px; font-weight:600; padding:2px 4px; "
+                "white-space:nowrap; z-index:9999;"
             ),
         ),
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
