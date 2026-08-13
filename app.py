@@ -129,15 +129,23 @@ if search.strip():
     search_matches = filtered[mask]
     if search_matches.empty:
         st.sidebar.warning("No match found.")
+    elif len(search_matches) == 1:
+        st.sidebar.success("Found 1 match — map zoomed to it.")
     else:
-        st.sidebar.success(f"Found {len(search_matches)} match(es) — map centered on result.")
+        st.sidebar.success(
+            f"Found {len(search_matches)} matches — map zoomed to the first: "
+            f"{search_matches.iloc[0]['Customer Name']}."
+        )
 
 st.sidebar.caption(f"Showing {len(filtered)} of {len(df)} farms")
 
 # ============================================================
 # BUILD MAP
 # ============================================================
-focus_df = search_matches if not search_matches.empty else filtered
+if not search_matches.empty:
+    focus_df = search_matches.iloc[[0]]  # zoom to the first match only
+else:
+    focus_df = filtered
 
 if not focus_df.empty:
     center_lat = focus_df["lat"].mean()
