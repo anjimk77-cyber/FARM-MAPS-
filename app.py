@@ -114,28 +114,9 @@ map_style = st.sidebar.selectbox(
     ["Satellite", "OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"],
 )
 
-urgency = st.sidebar.multiselect(
-    "Due status",
-    ["Overdue soon (0-3 days)", "Upcoming (4-7 days)", "Later (8+ days)"],
-    default=["Overdue soon (0-3 days)", "Upcoming (4-7 days)", "Later (8+ days)"],
-)
-
 search = st.sidebar.text_input("Search customer / farm / ID")
 
 filtered = df.copy()
-
-def bucket(days):
-    if pd.isna(days):
-        return None
-    if days <= 3:
-        return "Overdue soon (0-3 days)"
-    elif days <= 7:
-        return "Upcoming (4-7 days)"
-    else:
-        return "Later (8+ days)"
-
-filtered["_bucket"] = filtered["Due date last Purchase"].apply(bucket)
-filtered = filtered[filtered["_bucket"].isin(urgency) | filtered["_bucket"].isna()]
 
 if search.strip():
     s = search.strip().lower()
@@ -185,7 +166,11 @@ for _, row in filtered.iterrows():
     days_label = "-" if pd.isna(days) else int(days)
     color = due_color(days)
 
-    display_name = row["Farm Name"] if row["Farm Name"] else row["Customer Name"]
+    display_name = (
+        f"{row['Customer Name']} — {row['Farm Name']}"
+        if row["Farm Name"]
+        else row["Customer Name"]
+    )
 
     popup_html = f"""
         <b>{row['Customer Name']}</b><br>
@@ -215,11 +200,16 @@ for _, row in filtered.iterrows():
     folium.Marker(
         location=[row["lat"], row["lon"]],
         popup=folium.Popup(popup_html, max_width=280),
-        tooltip=folium.Tooltip(display_name, permanent=True, direction="bottom"),
+        tooltip=folium.Tooltip(
+            display_name,
+            permanent=True,
+            direction="bottom",
+            style="font-size:10px; padding:1px 4px;",
+        ),
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
     ).add_to(m)
 
-st_folium(m, width=None, height=650, use_container_width=True)
+st_folium(m, width=None, height=900, use_container_width=True)
 
 st.caption(
     "Badge = days until next feed purchase is due "
