@@ -116,8 +116,9 @@ map_style = st.sidebar.selectbox(
 
 search = st.sidebar.text_input("Search customer / farm / ID")
 
-filtered = df.copy()
+filtered = df.copy()  # always show all farms — search only moves the map
 
+search_matches = pd.DataFrame()
 if search.strip():
     s = search.strip().lower()
     mask = (
@@ -125,16 +126,22 @@ if search.strip():
         | filtered["Farm Name"].astype(str).str.lower().str.contains(s)
         | filtered["Customer ID"].astype(str).str.lower().str.contains(s)
     )
-    filtered = filtered[mask]
+    search_matches = filtered[mask]
+    if search_matches.empty:
+        st.sidebar.warning("No match found.")
+    else:
+        st.sidebar.success(f"Found {len(search_matches)} match(es) — map centered on result.")
 
 st.sidebar.caption(f"Showing {len(filtered)} of {len(df)} farms")
 
 # ============================================================
 # BUILD MAP
 # ============================================================
-if not filtered.empty:
-    center_lat = filtered["lat"].mean()
-    center_lon = filtered["lon"].mean()
+focus_df = search_matches if not search_matches.empty else filtered
+
+if not focus_df.empty:
+    center_lat = focus_df["lat"].mean()
+    center_lon = focus_df["lon"].mean()
 else:
     center_lat, center_lon = 7.8731, 80.7718  # fallback: center of Sri Lanka
 
@@ -157,9 +164,12 @@ if map_style == "Satellite":
 else:
     m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=map_style)
 
-if len(filtered) > 1:
-    bounds = filtered[["lat", "lon"]].values.tolist()
+if len(focus_df) > 1:
+    bounds = focus_df[["lat", "lon"]].values.tolist()
     m.fit_bounds(bounds, padding=(40, 40))
+elif len(focus_df) == 1:
+    m.location = [focus_df.iloc[0]["lat"], focus_df.iloc[0]["lon"]]
+    m.options["zoom"] = 17
 
 for _, row in filtered.iterrows():
     days = row["Due date last Purchase"]
