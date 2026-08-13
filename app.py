@@ -17,6 +17,8 @@ Deploy:
 """
 
 import re
+import time
+import requests
 import pandas as pd
 import streamlit as st
 import folium
@@ -70,6 +72,29 @@ def due_color(days):
         return "green"
 
 
+@st.cache_data(ttl=None, show_spinner=False)
+def reverse_geocode_city(lat: float, lon: float) -> str:
+    """Look up the city/town name for a coordinate using OpenStreetMap Nominatim."""
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 12, "addressdetails": 1},
+            headers={"User-Agent": "sl-farm-map-streamlit-app"},
+            timeout=6,
+        )
+        addr = resp.json().get("address", {})
+        return (
+            addr.get("city")
+            or addr.get("town")
+            or addr.get("municipality")
+            or addr.get("village")
+            or addr.get("county")
+            or "Unknown"
+        )
+    except Exception:
+        return "Unknown"
+
+
 with st.spinner("Loading data from Google Sheet..."):
     try:
         raw_df = load_data(CSV_URL)
@@ -104,6 +129,14 @@ df["Due date last Purchase"] = pd.to_numeric(
     df["Due date last Purchase"], errors="coerce"
 )
 
+# Look up each farm's city/town (cached — only slow on first load)
+with st.spinner("Determining areas (cities)..."):
+    cities = []
+    for _, r in df.iterrows():
+        cities.append(reverse_geocode_city(r["lat"], r["lon"]))
+        time.sleep(0.05)  # keep within Nominatim's fair-use rate limit
+    df["City"] = cities
+
 # ============================================================
 # SIDEBAR FILTERS
 # ============================================================
@@ -129,15 +162,33 @@ if search.strip():
     search_matches = filtered[mask]
     if search_matches.empty:
         st.sidebar.warning("No match found.")
+    elif len(search_matches) == 1:
+        st.sidebar.success("Found 1 match — map zoomed to it.")
     else:
-        st.sidebar.success(f"Found {len(search_matches)} match(es) — map centered on result.")
+        st.sidebar.success(
+            f"Found {len(search_matches)} matches — map zoomed to the first: "
+            f"{search_matches.iloc[0]['Customer Name']}."
+        )
+
+# Select area (city) — zooms/fits the map to every farm in that city
+city_options = ["-- All areas --"] + sorted(df["City"].dropna().unique().tolist())
+selected_city = st.sidebar.selectbox("Select area (city)", city_options)
+
+selected_match = pd.DataFrame()
+if selected_city != "-- All areas --":
+    selected_match = df[df["City"] == selected_city]
 
 st.sidebar.caption(f"Showing {len(filtered)} of {len(df)} farms")
 
 # ============================================================
 # BUILD MAP
 # ============================================================
-focus_df = search_matches if not search_matches.empty else filtered
+if not selected_match.empty:
+    focus_df = selected_match  # area/city select — show every farm in that city
+elif not search_matches.empty:
+    focus_df = search_matches.iloc[[0]]  # customer search — zoom to the first match only
+else:
+    focus_df = filtered
 
 if not focus_df.empty:
     center_lat = focus_df["lat"].mean()
@@ -216,10 +267,8 @@ for _, row in filtered.iterrows():
             direction="bottom",
             offset=(0, 12),
             style=(
-                "font-size:13px; font-weight:600; padding:2px 6px; "
-                "white-space:nowrap; background:white; "
-                "border:1px solid #999; border-radius:4px; "
-                "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
+                "font-size:13px; font-weight:600; padding:2px 4px; "
+                "white-space:nowrap; z-index:9999;"
             ),
         ),
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
