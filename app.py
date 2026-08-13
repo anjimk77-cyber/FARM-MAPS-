@@ -204,10 +204,16 @@ for _, row in filtered.iterrows():
             display_name,
             permanent=True,
             direction="bottom",
-            offset=(0, 10),
-            style="font-size:13px; font-weight:600; padding:2px 6px;",
+            offset=(0, 12),
+            style=(
+                "font-size:13px; font-weight:600; padding:2px 6px; "
+                "white-space:nowrap; background:white; "
+                "border:1px solid #999; border-radius:4px; "
+                "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
+            ),
         ),
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
+        z_index_offset=1000,
     ).add_to(m)
 
 st_folium(m, width=None, height=900, use_container_width=True)
