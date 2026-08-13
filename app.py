@@ -1,9 +1,10 @@
 """
 Sri Lanka Shrimp Farm Map - Streamlit App
 -------------------------------------------
-Pulls customer/farm data live from a public Google Sheet and plots each
-farm on an interactive (satellite/street) map, with a badge showing days
-until/since the feed-purchase due date.
+Pulls farm/customer locations from one Google Sheet, and automatically
+computes Last Feed Purchase Date / Due date last Purchase / Last Order
+from a separate sales-log Google Sheet (same logic as the Feed Purchase
+Report app: Item No. starting with "FEED", excluding returns).
 
 Local run:
     pip install -r requirements.txt
@@ -12,8 +13,8 @@ Local run:
 Deploy:
     Push this folder to a GitHub repo, then deploy on
     https://share.streamlit.io (Streamlit Community Cloud), pointing it
-    at app.py. No secrets needed as long as the Google Sheet is shared as
-    "Anyone with the link -> Viewer".
+    at app.py. No secrets needed as long as both Google Sheets are shared
+    as "Anyone with the link -> Viewer".
 """
 
 import re
@@ -25,12 +26,24 @@ from streamlit_folium import st_folium
 # ============================================================
 # CONFIG
 # ============================================================
-# Your Google Sheet ID (from the URL) and the tab's gid.
-# Default tab gid is usually 0 — change it if your data is on another tab.
-SHEET_ID = "1v2qTD5iUtdjFTixt9VZ1vM0dZPnyEVz4AYHtILVJi0A"
-SHEET_GID = "0"
+# Farm/customer location sheet (Customer ID, Customer Name, Farm Name, Location)
+LOCATIONS_SHEET_ID = "1v2qTD5iUtdjFTixt9VZ1vM0dZPnyEVz4AYHtILVJi0A"
+LOCATIONS_GID = "0"
+LOCATIONS_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{LOCATIONS_SHEET_ID}"
+    f"/export?format=csv&gid={LOCATIONS_GID}"
+)
 
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={SHEET_GID}"
+# Sales log sheet (Date, Customer Code, Item No., Item Description, Quantity, ...)
+# — same sheet/logic used by the Feed Purchase Report app.
+SALES_SHEET_ID = "1S3csAE-E_hN8vstuHR0KkeAN7yCVQTFe4AkEVlw4vQw"
+SALES_GID = "0"
+SALES_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{SALES_SHEET_ID}"
+    f"/export?format=csv&gid={SALES_GID}"
+)
+
+FEED_PREFIX = "FEED"  # Item No. prefix that identifies "feed" items
 
 st.set_page_config(page_title="Sri Lanka Farm Map", page_icon="🦐", layout="wide")
 st.title("🦐 Farm Locations - Feed Purchase Tracker")
@@ -39,10 +52,21 @@ st.title("🦐 Farm Locations - Feed Purchase Tracker")
 # ============================================================
 # DATA LOADING
 # ============================================================
-@st.cache_data(ttl=300)  # refresh from Google Sheets every 5 minutes
-def load_data(url: str) -> pd.DataFrame:
+@st.cache_data(ttl=300, show_spinner="Loading farm locations...")
+def load_locations(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
     df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner="Loading sales data...")
+def load_sales_data(url: str) -> pd.DataFrame:
+    df = pd.read_csv(url)
+    df.columns = [c.strip() for c in df.columns]
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Customer Code"] = df["Customer Code"].astype(str).str.strip()
+    df["Item No."] = df["Item No."].astype(str).str.strip()
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
     return df
 
 
@@ -70,25 +94,60 @@ def due_color(days):
         return "green"
 
 
-with st.spinner("Loading data from Google Sheet..."):
+def build_feed_report(sales: pd.DataFrame) -> pd.DataFrame:
+    """
+    Same logic as the Feed Purchase Report app's build_report():
+    Item No. starts with FEED, excludes returns (Quantity <= 0),
+    computes Last Feed Purchase Date, Due date last Purchase (days since),
+    and Last Order (items bought on that last purchase date).
+    """
+    feed_sales = sales[
+        sales["Item No."].str.upper().str.startswith(FEED_PREFIX) & (sales["Quantity"] > 0)
+    ].copy()
+
+    last_feed = feed_sales.groupby("Customer Code")["Date"].max().rename("Last Feed Purchase Date")
+    report = last_feed.reset_index()
+
+    today = pd.Timestamp.now().normalize()
+    report["Due date last Purchase"] = (today - report["Last Feed Purchase Date"]).dt.days
+
+    merged = feed_sales.merge(
+        report[["Customer Code", "Last Feed Purchase Date"]], on="Customer Code", how="inner"
+    )
+    same_day = merged[merged["Date"] == merged["Last Feed Purchase Date"]]
+
+    def combine_items(rows: pd.DataFrame) -> str:
+        parts = [f"{desc} ({qty:g})" for desc, qty in zip(rows["Item Description"], rows["Quantity"])]
+        return ", ".join(parts)
+
+    last_order = same_day.groupby("Customer Code").apply(combine_items).rename("Last Order")
+    report = report.merge(last_order, on="Customer Code", how="left")
+
+    report["Last Feed Purchase Date"] = report["Last Feed Purchase Date"].dt.strftime("%Y-%m-%d")
+    return report
+
+
+with st.spinner("Loading data..."):
     try:
-        raw_df = load_data(CSV_URL)
+        raw_locations = load_locations(LOCATIONS_CSV_URL)
+        sales_df = load_sales_data(SALES_CSV_URL)
     except Exception as e:
         st.error(
-            "Could not load the Google Sheet. Make sure it's shared as "
+            "Could not load one of the Google Sheets. Make sure both are shared as "
             "'Anyone with the link — Viewer'.\n\n"
             f"Details: {e}"
         )
         st.stop()
 
 if st.sidebar.button("🔄 Refresh data now"):
-    load_data.clear()
+    load_locations.clear()
+    load_sales_data.clear()
     st.rerun()
 
 # ============================================================
 # CLEAN / PREPARE DATA
 # ============================================================
-df = raw_df.copy()
+df = raw_locations.copy()
 
 lat_lon = df["Location"].apply(parse_lat_lon)
 df["lat"] = lat_lon.apply(lambda x: x[0])
@@ -99,6 +158,19 @@ df = df.dropna(subset=["lat", "lon"])
 # Treat "-" or blank farm names as missing
 df["Farm Name"] = df["Farm Name"].astype(str).str.strip()
 df.loc[df["Farm Name"].isin(["-", "nan", ""]), "Farm Name"] = ""
+
+df["Customer ID"] = df["Customer ID"].astype(str).str.strip()
+
+# Drop the old static columns from the locations sheet — these now come
+# from the sales log automatically instead.
+df = df.drop(columns=["Last Feed Purchase Date", "Due date last Purchase"], errors="ignore")
+
+# Compute Last Feed Purchase Date / Due date last Purchase / Last Order
+# from the sales sheet, and merge onto each farm by Customer ID <-> Customer Code.
+feed_report = build_feed_report(sales_df)
+df = df.merge(
+    feed_report, left_on="Customer ID", right_on="Customer Code", how="left"
+).drop(columns=["Customer Code"], errors="ignore")
 
 df["Due date last Purchase"] = pd.to_numeric(
     df["Due date last Purchase"], errors="coerce"
@@ -190,12 +262,16 @@ for _, row in filtered.iterrows():
         else row["Customer Name"]
     )
 
+    last_order = row.get("Last Order", "")
+    last_order_html = last_order if isinstance(last_order, str) and last_order.strip() else "(no purchase on record)"
+
     popup_html = f"""
         <b>{row['Customer Name']}</b><br>
         Farm: {row['Farm Name'] if row['Farm Name'] else '(none listed)'}<br>
         Customer ID: {row['Customer ID']}<br>
         Last Feed Purchase: {row.get('Last Feed Purchase Date', '-')}<br>
-        Due in: {days_label} day(s)
+        Due in: {days_label} day(s)<br>
+        Last Order: {last_order_html}
     """
 
     badge_html = f"""
@@ -238,6 +314,6 @@ st_folium(m, width=None, height=900, use_container_width=True)
 
 st.caption(
     "Badge = days until next feed purchase is due "
-    "(🔴 0-3 days, 🟠 4-7 days, 🟢 8+ days). "
+    "(🔴 0-3 days, 🟠 4-7 days, 🟢 8+ days). Click a badge to see Last Order. "
     "Data refreshes from Google Sheets every 5 minutes, or click 'Refresh data now'."
 )
