@@ -251,6 +251,14 @@ elif len(focus_df) == 1:
     m.location = [focus_df.iloc[0]["lat"], focus_df.iloc[0]["lon"]]
     m.options["zoom"] = 17
 
+# By default Leaflet renders tooltips above markers, so a nearby farm's
+# name label can cover another farm's badge. Swap the stacking order so
+# badges always stay on top and stay visible.
+m.get_root().html.add_child(folium.Element(
+    "<style>.leaflet-tooltip-pane{z-index:600 !important;}"
+    ".leaflet-marker-pane{z-index:650 !important;}</style>"
+))
+
 for _, row in filtered.iterrows():
     days = row["Due date last Purchase"]
     days_label = "-" if pd.isna(days) else int(days)
@@ -300,10 +308,11 @@ for _, row in filtered.iterrows():
             direction="bottom",
             offset=(0, 12),
             style=(
-                "font-size:13px; font-weight:600; padding:2px 6px; "
-                "white-space:nowrap; background:white; "
-                "border:1px solid #999; border-radius:4px; "
-                "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
+                "font-size:13px; font-weight:700; padding:2px 4px; "
+                "white-space:nowrap; z-index:9999; color:#111; "
+                "background:transparent; border:none; box-shadow:none; "
+                "text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, "
+                "-1px 1px 0 #fff, 1px 1px 0 #fff, 0 0 3px #fff;"
             ),
         ),
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
