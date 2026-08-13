@@ -300,10 +300,11 @@ for _, row in filtered.iterrows():
             direction="bottom",
             offset=(0, 12),
             style=(
-                "font-size:13px; font-weight:600; padding:2px 6px; "
-                "white-space:nowrap; background:white; "
-                "border:1px solid #999; border-radius:4px; "
-                "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
+                "font-size:13px; font-weight:700; padding:2px 4px; "
+                "white-space:nowrap; z-index:9999; color:#111; "
+                "background:transparent; border:none; box-shadow:none; "
+                "text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, "
+                "-1px 1px 0 #fff, 1px 1px 0 #fff, 0 0 3px #fff;"
             ),
         ),
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
