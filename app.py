@@ -45,7 +45,7 @@ SALES_CSV_URL = (
 
 FEED_PREFIX = "FEED"  # Item No. prefix that identifies "feed" items
 
-st.set_page_config(page_title="Sri Lanka Farm Map", page_icon="🦐", layout="wide")
+st.set_page_config(page_title="Farm Map", page_icon="🦐", layout="wide")
 st.title("🦐 Farm Locations - Feed Purchase Tracker")
 
 
