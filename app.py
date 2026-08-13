@@ -204,7 +204,8 @@ for _, row in filtered.iterrows():
             display_name,
             permanent=True,
             direction="bottom",
-            style="font-size:10px; padding:1px 4px;",
+            offset=(0, 10),
+            style="font-size:13px; font-weight:600; padding:2px 6px;",
         ),
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
     ).add_to(m)
