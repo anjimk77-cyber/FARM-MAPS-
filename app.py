@@ -17,6 +17,8 @@ Deploy:
 """
 
 import re
+import time
+import requests
 import pandas as pd
 import streamlit as st
 import folium
@@ -70,6 +72,29 @@ def due_color(days):
         return "green"
 
 
+@st.cache_data(ttl=None, show_spinner=False)
+def reverse_geocode_city(lat: float, lon: float) -> str:
+    """Look up the city/town name for a coordinate using OpenStreetMap Nominatim."""
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 12, "addressdetails": 1},
+            headers={"User-Agent": "sl-farm-map-streamlit-app"},
+            timeout=6,
+        )
+        addr = resp.json().get("address", {})
+        return (
+            addr.get("city")
+            or addr.get("town")
+            or addr.get("municipality")
+            or addr.get("village")
+            or addr.get("county")
+            or "Unknown"
+        )
+    except Exception:
+        return "Unknown"
+
+
 with st.spinner("Loading data from Google Sheet..."):
     try:
         raw_df = load_data(CSV_URL)
@@ -104,6 +129,14 @@ df["Due date last Purchase"] = pd.to_numeric(
     df["Due date last Purchase"], errors="coerce"
 )
 
+# Look up each farm's city/town (cached — only slow on first load)
+with st.spinner("Determining areas (cities)..."):
+    cities = []
+    for _, r in df.iterrows():
+        cities.append(reverse_geocode_city(r["lat"], r["lon"]))
+        time.sleep(0.05)  # keep within Nominatim's fair-use rate limit
+    df["City"] = cities
+
 # ============================================================
 # SIDEBAR FILTERS
 # ============================================================
@@ -132,17 +165,13 @@ if search.strip():
     else:
         st.sidebar.success(f"Found {len(search_matches)} match(es) — map centered on result.")
 
-# Build a label for each row so it can be picked from a dropdown
-def make_label(row):
-    return f"{row['Customer Name']} — {row['Farm Name']}" if row["Farm Name"] else row["Customer Name"]
-
-area_options = ["-- All areas --"] + [make_label(r) for _, r in df.iterrows()]
-selected_area = st.sidebar.selectbox("Select area", area_options)
+# Select area (city) — zooms/fits the map to every farm in that city
+city_options = ["-- All areas --"] + sorted(df["City"].dropna().unique().tolist())
+selected_city = st.sidebar.selectbox("Select area (city)", city_options)
 
 selected_match = pd.DataFrame()
-if selected_area != "-- All areas --":
-    labels = df.apply(make_label, axis=1)
-    selected_match = df[labels == selected_area]
+if selected_city != "-- All areas --":
+    selected_match = df[df["City"] == selected_city]
 
 st.sidebar.caption(f"Showing {len(filtered)} of {len(df)} farms")
 
