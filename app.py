@@ -321,7 +321,7 @@ for _, row in filtered.iterrows():
 st_folium(m, width=None, height=900, use_container_width=True)
 
 st.caption(
-    "Badge = days until next feed purchase is due "
-    "(🔴 0-3 days, 🟠 4-7 days, 🟢 8+ days). Click a badge to see Last Order. "
-    "Data refreshes from Google Sheets every 5 minutes, or click 'Refresh data now'."
+    ""
+    " "
+    ""
 )
