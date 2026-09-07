@@ -6,25 +6,34 @@ computes Last Feed Purchase Date / Due date last Purchase / Last Order
 from a separate sales-log Google Sheet (same logic as the Feed Purchase
 Report app: Item No. starting with "FEED", excluding returns).
 
-NEW: also pulls pond records from the WaterQualityData Google Sheet (the
-same sheet the manager app's "Pond Layout" section uses) and renders that
-farm's Pond Layout — one box per pond, colored by status, showing
-DOC Today or Full-Harvest info — right inside each marker's popup, below
-the existing feed-purchase details. The pond-status logic (Running /
-Partial H / Full H / Soon to be, DOC Today, "2nd harvest slot wins", etc.)
-is ported from the manager app so both apps stay consistent.
+NEW: also pulls pond records from the WaterQualityData Google Sheet and
+renders that farm's Pond Layout — one box per pond, colored by status,
+showing DOC Today or Full-Harvest info — right inside each marker's
+popup, below the existing feed-purchase details. Both the data-loading
+and the pond-status logic (Running / Partial H / Full H / Soon to be,
+DOC Today, "2nd harvest slot wins", etc.) are ported straight from the
+manager app's "Pond Layout" section, so the two apps stay consistent —
+including HOW the data is fetched: WaterQualityData is a private sheet,
+so (like the manager app) this reads it via gspread + a Google service
+account, not a public CSV link.
 
 Local run:
     pip install -r requirements.txt
     streamlit run app.py
+    Needs the same `.streamlit/secrets.toml` as the manager app — the
+    `[gcp_service_account]` section, plus a `[gsheet]` section with
+    `sheet_id` (the WaterQualityData spreadsheet's key) and optionally
+    `worksheet_name` (defaults to "WaterQualityData").
 
 Deploy:
     Push this folder to a GitHub repo, then deploy on
     https://share.streamlit.io (Streamlit Community Cloud), pointing it
-    at app.py. No secrets needed as long as all three Google Sheets below
-    are shared as "Anyone with the link -> Viewer" (this app — unlike the
-    manager app — reads everything through plain CSV export links, no
-    service-account credentials).
+    at app.py. The Locations and Sales sheets must be shared as "Anyone
+    with the link -> Viewer" (read via plain CSV export). The
+    WaterQualityData sheet does NOT need to be public — instead, share it
+    with the service account's email (same account/secrets used by the
+    manager app) as Viewer or Editor, and set `[gcp_service_account]` /
+    `[gsheet]` in this app's Streamlit Cloud secrets.
 """
 
 import re
@@ -33,6 +42,9 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 from datetime import date
+
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ============================================================
 # CONFIG
@@ -54,20 +66,13 @@ SALES_CSV_URL = (
     f"/export?format=csv&gid={SALES_GID}"
 )
 
-# NEW — WaterQualityData sheet (Customer, Farm Name with Code, Pond Number,
-# Date, Species Culture, Cycle Type, DOC, Harvest Date/Type, Harvest Date
-# 2/Type 2, Deleted, Harvest Status, ...). This is the SAME sheet the
-# manager app's "Pond Layout" section reads, just pulled here via a plain
-# CSV export link instead of gspread + a service account. Fill in your own
-# sheet ID / gid below, and make sure that sheet is shared as
-# "Anyone with the link -> Viewer" — this app has no Google credentials,
-# so a private sheet will fail to load.
-WATERQUALITY_SHEET_ID = "1ZRmAb9CymV3o7_D-c9KtzTefg60HvDesLD-TEK2AB2o"
-WATERQUALITY_GID = "0"
-WATERQUALITY_CSV_URL = (
-    f"https://docs.google.com/spreadsheets/d/{WATERQUALITY_SHEET_ID}"
-    f"/export?format=csv&gid={WATERQUALITY_GID}"
-)
+# WaterQualityData sheet (Customer, Farm Name with Code, Pond Number, Date,
+# Species Culture, Cycle Type, DOC, Harvest Date/Type, Harvest Date 2/Type
+# 2, Deleted, Harvest Status, ...) — the SAME sheet + same access method
+# (gspread + service account) as the manager app, via
+# st.secrets["gcp_service_account"] and st.secrets["gsheet"]["sheet_id"].
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+WATERQUALITY_WORKSHEET_NAME_DEFAULT = "WaterQualityData"
 
 FEED_PREFIX = "FEED"  # Item No. prefix that identifies "feed" items
 
@@ -96,12 +101,34 @@ def load_sales_data(url: str) -> pd.DataFrame:
     return df
 
 
+def _gsheet_configured():
+    return "gcp_service_account" in st.secrets and "gsheet" in st.secrets and "sheet_id" in st.secrets["gsheet"]
+
+
+@st.cache_resource(show_spinner=False)
+def get_pond_worksheet():
+    """Same pattern as the manager app's get_worksheet(): authorize with
+    the service account, open the spreadsheet by key, grab the
+    WaterQualityData tab (name overridable via
+    st.secrets["gsheet"]["worksheet_name"])."""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    sheet_id = st.secrets["gsheet"]["sheet_id"]
+    worksheet_name = st.secrets["gsheet"].get("worksheet_name", WATERQUALITY_WORKSHEET_NAME_DEFAULT)
+    sh = client.open_by_key(sheet_id)
+    return sh.worksheet(worksheet_name)
+
+
 @st.cache_data(ttl=300, show_spinner="Loading pond data...")
-def load_pond_data(url: str) -> pd.DataFrame:
-    """Pond records for the Pond Layout popup. Mirrors the filtering the
-    manager app applies in load_data(): soft-deleted rows (Deleted = Yes)
-    and recycle-binned harvest rows (Harvest Status = 'H') are dropped."""
-    df = pd.read_csv(url)
+def load_pond_data() -> pd.DataFrame:
+    """Pond records for the Pond Layout popup, read the same way the
+    manager app's load_data() reads them: soft-deleted rows
+    (Deleted = Yes) and recycle-binned harvest rows
+    (Harvest Status = 'H') are dropped."""
+    ws = get_pond_worksheet()
+    records = ws.get_all_records()
+    df = pd.DataFrame(records)
     df.columns = [c.strip() for c in df.columns]
 
     required_cols = [
@@ -119,22 +146,6 @@ def load_pond_data(url: str) -> pd.DataFrame:
     if "Harvest Status" in df.columns:
         is_harvest_hidden = df["Harvest Status"].astype(str).str.strip().str.upper() == "H"
         df = df[~is_harvest_hidden]
-
-    # The sheet has no separate 'Customer Code' column — the code (e.g.
-    # "C00123") lives at the start of 'Farm Name with Code'. Prefer a
-    # regex match for "letter + 5 digits" (handles any separator/spacing
-    # after it); fall back to the first 6 non-space characters if that
-    # pattern isn't found, so a slightly different code format still gets
-    # something to compare against instead of an empty string.
-    def _extract_customer_code(v):
-        s = str(v).strip()
-        m = re.match(r"^([A-Za-z]\s*\d{5})", s)
-        if m:
-            return re.sub(r"\s+", "", m.group(1)).upper()
-        compact = re.sub(r"\s+", "", s)
-        return compact[:6].upper()
-
-    df["_DerivedCustomerCode"] = df["Farm Name with Code"].apply(_extract_customer_code)
 
     return df.reset_index(drop=True)
 
@@ -264,23 +275,15 @@ def _species_letter(species):
     return ""
 
 
-def match_pond_rows(pond_df: pd.DataFrame, customer_id: str, customer_name: str, farm_name: str) -> pd.DataFrame:
-    """Matches a marker to its rows in the WaterQualityData sheet.
-    Primary link: Customer ID (locations sheet) <-> the customer code
-    embedded in 'Farm Name with Code' (see _extract_customer_code above).
-    Both sides are stripped of whitespace and upper-cased before
-    comparing, so formatting differences (spaces, case) don't break the
-    match. Falls back to the old Customer Name / Farm Name matching only
-    if the code doesn't match anything."""
+def match_pond_rows(pond_df: pd.DataFrame, customer_name: str, farm_name: str) -> pd.DataFrame:
+    """Matches the locations sheet's Customer Name / Farm Name to the
+    WaterQualityData sheet's Customer / Farm Name with Code columns —
+    same fields the manager app filters on. Customer is matched exactly
+    (case-insensitive, trimmed); farm is matched as a substring, since
+    'Farm Name with Code' usually has an extra code appended after the
+    plain farm name."""
     if pond_df.empty:
         return pond_df
-
-    code = re.sub(r"\s+", "", str(customer_id).strip()).upper()
-    if code and "_DerivedCustomerCode" in pond_df.columns:
-        code_matches = pond_df[pond_df["_DerivedCustomerCode"] == code]
-        if not code_matches.empty:
-            return code_matches
-
     cust = str(customer_name).strip().lower()
     farm = str(farm_name).strip().lower()
     mask_cust = pond_df["Customer"].astype(str).str.strip().str.lower() == cust
@@ -409,15 +412,19 @@ with st.spinner("Loading data..."):
         st.stop()
 
 # Pond data is loaded separately and failures here are non-fatal — the map
-# and feed-purchase details still work even if the WaterQualityData sheet
-# isn't reachable yet (e.g. the placeholder sheet ID above hasn't been
-# filled in), just without the Pond Layout section in the popups.
+# Pond data is loaded separately (via gspread + service account, since
+# WaterQualityData is private) and failures here are non-fatal — the map
+# and feed-purchase details still work even if secrets aren't configured
+# yet, just without the Pond Layout section in the popups.
 pond_df = pd.DataFrame()
 pond_load_error = None
-try:
-    pond_df = load_pond_data(WATERQUALITY_CSV_URL)
-except Exception as e:
-    pond_load_error = str(e)
+if _gsheet_configured():
+    try:
+        pond_df = load_pond_data()
+    except Exception as e:
+        pond_load_error = str(e)
+else:
+    pond_load_error = "not_configured"
 
 if st.sidebar.button("🔄 Refresh data now"):
     load_locations.clear()
@@ -425,11 +432,18 @@ if st.sidebar.button("🔄 Refresh data now"):
     load_pond_data.clear()
     st.rerun()
 
-if pond_load_error:
+if pond_load_error == "not_configured":
     st.sidebar.warning(
-        "⚠️ Pond Layout unavailable — could not load the WaterQualityData sheet. "
-        "Check WATERQUALITY_SHEET_ID/GID at the top of app.py and make sure that "
-        "sheet is shared as 'Anyone with the link — Viewer'."
+        "⚠️ Pond Layout unavailable — add the same `[gcp_service_account]` "
+        "and `[gsheet]` (with `sheet_id` for the WaterQualityData "
+        "spreadsheet) sections used by the manager app to this app's "
+        "`.streamlit/secrets.toml`."
+    )
+elif pond_load_error:
+    st.sidebar.warning(
+        f"⚠️ Pond Layout unavailable — could not load the WaterQualityData "
+        f"sheet. Check your `[gsheet]` secrets and that the sheet is shared "
+        f"with the service account.\n\nDetails: {pond_load_error}"
     )
 
 # ============================================================
@@ -449,16 +463,16 @@ df.loc[df["Farm Name"].isin(["-", "nan", ""]), "Farm Name"] = ""
 
 df["Customer ID"] = df["Customer ID"].astype(str).str.strip()
 
-# Debug panel — since "No pond records found" can come from a Customer ID
-# / derived-code format mismatch that's hard to guess blind, this shows
-# the actual values being compared side by side so the mismatch is
-# visible directly. Safe to remove once matching is confirmed working.
+# Debug panel — since "No pond records found" can come from a Customer
+# Name / Farm Name mismatch that's hard to guess blind, this shows the
+# actual values being compared side by side. Safe to remove once matching
+# is confirmed working.
 with st.sidebar.expander("🔧 Pond match debug"):
     st.caption(f"Pond rows loaded: {len(pond_df)}")
     if not pond_df.empty:
         st.write("From WaterQualityData sheet:")
         st.dataframe(
-            pond_df[["Customer", "Farm Name with Code", "_DerivedCustomerCode"]].drop_duplicates().head(10),
+            pond_df[["Customer", "Farm Name with Code"]].drop_duplicates().head(10),
             hide_index=True,
         )
     st.write("From locations sheet:")
@@ -582,7 +596,7 @@ for _, row in filtered.iterrows():
     # NEW — Pond Layout for this farm, matched from the WaterQualityData
     # sheet by Customer Name + Farm Name, appended below the existing
     # feed-purchase info inside the click popup.
-    farm_pond_rows = match_pond_rows(pond_df, row["Customer ID"], row["Customer Name"], row["Farm Name"])
+    farm_pond_rows = match_pond_rows(pond_df, row["Customer Name"], row["Farm Name"])
     pond_layout_html = build_pond_layout_html(farm_pond_rows)
 
     popup_html = f"""
