@@ -120,6 +120,11 @@ def load_pond_data(url: str) -> pd.DataFrame:
         is_harvest_hidden = df["Harvest Status"].astype(str).str.strip().str.upper() == "H"
         df = df[~is_harvest_hidden]
 
+    # The sheet has no separate 'Customer Code' column — the code (e.g.
+    # "C00123") is the first 6 characters of 'Farm Name with Code'. Derive
+    # it once here so match_pond_rows() can link on it directly.
+    df["_DerivedCustomerCode"] = df["Farm Name with Code"].astype(str).str.strip().str[:6].str.upper()
+
     return df.reset_index(drop=True)
 
 
@@ -248,14 +253,21 @@ def _species_letter(species):
     return ""
 
 
-def match_pond_rows(pond_df: pd.DataFrame, customer_name: str, farm_name: str) -> pd.DataFrame:
-    """Matches the locations sheet's Customer Name / Farm Name to the
-    WaterQualityData sheet's Customer / Farm Name with Code columns.
-    Customer is matched exactly (case-insensitive); farm is matched as a
-    substring, since 'Farm Name with Code' often has an extra code
-    appended after the plain farm name."""
+def match_pond_rows(pond_df: pd.DataFrame, customer_id: str, customer_name: str, farm_name: str) -> pd.DataFrame:
+    """Matches a marker to its rows in the WaterQualityData sheet.
+    Primary link: Customer ID (locations sheet) <-> the customer code
+    embedded in 'Farm Name with Code' — the first 6 characters, e.g.
+    'C00123' out of 'C00123 - Some Farm'. Falls back to the old Customer
+    Name / Farm Name matching only if that code doesn't match anything."""
     if pond_df.empty:
         return pond_df
+
+    code = str(customer_id).strip().upper()
+    if code and "_DerivedCustomerCode" in pond_df.columns:
+        code_matches = pond_df[pond_df["_DerivedCustomerCode"] == code]
+        if not code_matches.empty:
+            return code_matches
+
     cust = str(customer_name).strip().lower()
     farm = str(farm_name).strip().lower()
     mask_cust = pond_df["Customer"].astype(str).str.strip().str.lower() == cust
@@ -539,7 +551,7 @@ for _, row in filtered.iterrows():
     # NEW — Pond Layout for this farm, matched from the WaterQualityData
     # sheet by Customer Name + Farm Name, appended below the existing
     # feed-purchase info inside the click popup.
-    farm_pond_rows = match_pond_rows(pond_df, row["Customer Name"], row["Farm Name"])
+    farm_pond_rows = match_pond_rows(pond_df, row["Customer ID"], row["Customer Name"], row["Farm Name"])
     pond_layout_html = build_pond_layout_html(farm_pond_rows)
 
     popup_html = f"""
