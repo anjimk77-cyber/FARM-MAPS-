@@ -6,6 +6,14 @@ computes Last Feed Purchase Date / Due date last Purchase / Last Order
 from a separate sales-log Google Sheet (same logic as the Feed Purchase
 Report app: Item No. starting with "FEED", excluding returns).
 
+NEW: also pulls pond records from the WaterQualityData Google Sheet (the
+same sheet the manager app's "Pond Layout" section uses) and renders that
+farm's Pond Layout — one box per pond, colored by status, showing
+DOC Today or Full-Harvest info — right inside each marker's popup, below
+the existing feed-purchase details. The pond-status logic (Running /
+Partial H / Full H / Soon to be, DOC Today, "2nd harvest slot wins", etc.)
+is ported from the manager app so both apps stay consistent.
+
 Local run:
     pip install -r requirements.txt
     streamlit run app.py
@@ -13,8 +21,10 @@ Local run:
 Deploy:
     Push this folder to a GitHub repo, then deploy on
     https://share.streamlit.io (Streamlit Community Cloud), pointing it
-    at app.py. No secrets needed as long as both Google Sheets are shared
-    as "Anyone with the link -> Viewer".
+    at app.py. No secrets needed as long as all three Google Sheets below
+    are shared as "Anyone with the link -> Viewer" (this app — unlike the
+    manager app — reads everything through plain CSV export links, no
+    service-account credentials).
 """
 
 import re
@@ -22,6 +32,7 @@ import pandas as pd
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+from datetime import date
 
 # ============================================================
 # CONFIG
@@ -41,6 +52,21 @@ SALES_GID = "0"
 SALES_CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{SALES_SHEET_ID}"
     f"/export?format=csv&gid={SALES_GID}"
+)
+
+# NEW — WaterQualityData sheet (Customer, Farm Name with Code, Pond Number,
+# Date, Species Culture, Cycle Type, DOC, Harvest Date/Type, Harvest Date
+# 2/Type 2, Deleted, Harvest Status, ...). This is the SAME sheet the
+# manager app's "Pond Layout" section reads, just pulled here via a plain
+# CSV export link instead of gspread + a service account. Fill in your own
+# sheet ID / gid below, and make sure that sheet is shared as
+# "Anyone with the link -> Viewer" — this app has no Google credentials,
+# so a private sheet will fail to load.
+WATERQUALITY_SHEET_ID = "PUT_YOUR_WATERQUALITYDATA_SHEET_ID_HERE"
+WATERQUALITY_GID = "0"
+WATERQUALITY_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{WATERQUALITY_SHEET_ID}"
+    f"/export?format=csv&gid={WATERQUALITY_GID}"
 )
 
 FEED_PREFIX = "FEED"  # Item No. prefix that identifies "feed" items
@@ -68,6 +94,33 @@ def load_sales_data(url: str) -> pd.DataFrame:
     df["Item No."] = df["Item No."].astype(str).str.strip()
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
     return df
+
+
+@st.cache_data(ttl=300, show_spinner="Loading pond data...")
+def load_pond_data(url: str) -> pd.DataFrame:
+    """Pond records for the Pond Layout popup. Mirrors the filtering the
+    manager app applies in load_data(): soft-deleted rows (Deleted = Yes)
+    and recycle-binned harvest rows (Harvest Status = 'H') are dropped."""
+    df = pd.read_csv(url)
+    df.columns = [c.strip() for c in df.columns]
+
+    required_cols = [
+        "Customer", "Farm Name with Code", "Pond Number", "Date",
+        "Species Culture", "Cycle Type", "DOC",
+        "Harvest Date", "Harvest Type", "Harvest Date 2", "Harvest Type 2",
+    ]
+    for c in required_cols:
+        if c not in df.columns:
+            df[c] = ""
+
+    if "Deleted" in df.columns:
+        is_deleted = df["Deleted"].astype(str).str.strip().str.lower().isin(["yes", "true", "1"])
+        df = df[~is_deleted]
+    if "Harvest Status" in df.columns:
+        is_harvest_hidden = df["Harvest Status"].astype(str).str.strip().str.upper() == "H"
+        df = df[~is_harvest_hidden]
+
+    return df.reset_index(drop=True)
 
 
 def parse_lat_lon(location: str):
@@ -127,6 +180,197 @@ def build_feed_report(sales: pd.DataFrame) -> pd.DataFrame:
     return report
 
 
+# ============================================================
+# NEW — POND LAYOUT (ported from the manager app's Pond Layout section)
+# ============================================================
+def _escape_html_pond(v):
+    return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _compute_doc_today(row):
+    """Same rule as the manager app: saved DOC + days elapsed since Date,
+    frozen at the Full-Harvest date once a pond reaches Full H, and stuck
+    at 0 for 'Soon to be' ponds that haven't started yet."""
+    if str(row.get("Cycle Type") or "").strip() == "Soon to be":
+        return "0"
+    parsed = pd.to_datetime(row.get("Date"), errors="coerce")
+    if pd.isna(parsed):
+        return ""
+    try:
+        doc_num = int(float(row.get("DOC")))
+    except (TypeError, ValueError):
+        return ""
+    t2 = str(row.get("Harvest Type 2", "")).strip().lower()
+    t1 = str(row.get("Harvest Type", "")).strip().lower()
+    full_harvest_date_str = ""
+    if "full" in t2:
+        full_harvest_date_str = str(row.get("Harvest Date 2", "")).strip()
+    elif "full" in t1:
+        full_harvest_date_str = str(row.get("Harvest Date", "")).strip()
+    if full_harvest_date_str:
+        full_harvest_date = pd.to_datetime(full_harvest_date_str, errors="coerce")
+        if pd.notna(full_harvest_date):
+            return str(doc_num + (full_harvest_date - parsed).days)
+    days_passed = (pd.Timestamp(date.today()) - parsed).days
+    return str(doc_num + days_passed)
+
+
+def _pond_harvest_type(prow):
+    return str(prow.get("Harvest Type 2", "")).strip() or str(prow.get("Harvest Type", "")).strip()
+
+
+def _pond_status(prow, has_partial_history):
+    h_type_lower = _pond_harvest_type(prow).lower()
+    if "full" in h_type_lower:
+        return "Full H"
+    elif "partial" in h_type_lower or has_partial_history:
+        return "Partial H"
+    elif str(prow.get("Cycle Type", "")).strip() == "Soon to be":
+        return "Soon to be"
+    else:
+        return "Running"
+
+
+def _pond_box_color(status):
+    return {
+        "Partial H": "#fff3cd",  # yellow
+        "Full H": "#d4edda",     # green
+        "Soon to be": "#e2e2e2", # gray
+    }.get(status, "#eaf4ff")     # default blue — running, no harvest yet
+
+
+def _species_letter(species):
+    s = str(species).strip().lower()
+    if "vannamei" in s:
+        return "V"
+    elif "monodon" in s:
+        return "M"
+    return ""
+
+
+def match_pond_rows(pond_df: pd.DataFrame, customer_name: str, farm_name: str) -> pd.DataFrame:
+    """Matches the locations sheet's Customer Name / Farm Name to the
+    WaterQualityData sheet's Customer / Farm Name with Code columns.
+    Customer is matched exactly (case-insensitive); farm is matched as a
+    substring, since 'Farm Name with Code' often has an extra code
+    appended after the plain farm name."""
+    if pond_df.empty:
+        return pond_df
+    cust = str(customer_name).strip().lower()
+    farm = str(farm_name).strip().lower()
+    mask_cust = pond_df["Customer"].astype(str).str.strip().str.lower() == cust
+    if not farm:
+        return pond_df[mask_cust]
+    mask_farm = pond_df["Farm Name with Code"].astype(str).str.strip().str.lower().str.contains(
+        re.escape(farm), na=False
+    )
+    return pond_df[mask_cust & mask_farm]
+
+
+def build_pond_layout_html(farm_pond_df: pd.DataFrame) -> str:
+    """Builds the same style of pond-box grid as the manager app's Pond
+    Layout section, from that farm's rows in the WaterQualityData sheet."""
+    if farm_pond_df.empty:
+        return "<div style='font-size:0.8rem;color:#777;'>No pond records found for this farm.</div>"
+
+    df = farm_pond_df.copy()
+    df["_ParsedDate"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    # A pond keeps showing Partial H if ANY of its saved records ever had
+    # a Partial harvest — not just its most recent row.
+    partial_history_by_pond = (
+        df.assign(
+            _HasPartial=(
+                df["Harvest Type"].astype(str).str.lower().str.contains("partial")
+                | df["Harvest Type 2"].astype(str).str.lower().str.contains("partial")
+            )
+        )
+        .groupby("Pond Number")["_HasPartial"]
+        .any()
+    )
+
+    pond_latest = (
+        df.dropna(subset=["_ParsedDate"])
+        .sort_values("_ParsedDate")
+        .groupby("Pond Number", as_index=False)
+        .last()
+        .sort_values("Pond Number")
+    )
+
+    if pond_latest.empty:
+        return "<div style='font-size:0.8rem;color:#777;'>No dated pond records found for this farm.</div>"
+
+    pond_latest["DOC Today"] = pond_latest.apply(_compute_doc_today, axis=1)
+
+    boxes_html = ""
+    for _, prow in pond_latest.iterrows():
+        pond_no = _escape_html_pond(prow.get("Pond Number", ""))
+        has_partial = bool(partial_history_by_pond.get(prow.get("Pond Number", ""), False))
+        status = _pond_status(prow, has_partial)
+        box_color = _pond_box_color(status)
+
+        if status == "Full H":
+            h_date = str(prow.get("Harvest Date 2", "")).strip() or str(prow.get("Harvest Date", "")).strip()
+            h_date = _escape_html_pond(h_date or "-")
+            middle_html = (
+                "<div style='font-size:1.1rem;font-weight:bold;color:red;'>Full H</div>"
+                f"<div style='font-size:0.7rem;color:#333;'>{h_date}</div>"
+            )
+        elif status == "Soon to be":
+            middle_html = "<div style='font-size:1rem;font-weight:bold;color:#555;'>Soon to be</div>"
+        else:
+            doc_today_raw = prow.get("DOC Today", "")
+            doc_today_val = _escape_html_pond(doc_today_raw or "-")
+            try:
+                started_date = (
+                    pd.Timestamp(date.today()) - pd.Timedelta(days=int(float(doc_today_raw)))
+                ).strftime("%Y-%m-%d")
+                started_label = f"Started {started_date}"
+            except (TypeError, ValueError):
+                started_label = "Started ---"
+            middle_html = (
+                f"<div style='font-size:1.3rem;font-weight:bold;color:red;'>{doc_today_val}</div>"
+                f"<div style='font-size:0.65rem;color:#777;'>{_escape_html_pond(started_label)}</div>"
+            )
+
+        species_label = _species_letter(prow.get("Species Culture", ""))
+        species_html = (
+            f"<div style='font-size:0.7rem;font-weight:bold;color:#444;margin-top:2px;'>{species_label}</div>"
+            if species_label else ""
+        )
+
+        boxes_html += (
+            "<div style='display:inline-flex;flex-direction:column;align-items:center;margin:4px;'>"
+            "<div style='width:100px;height:70px;border:2px solid #333;border-radius:6px;"
+            "display:flex;flex-direction:column;align-items:center;justify-content:center;"
+            f"background:{box_color};'>"
+            f"<div style='font-size:0.7rem;color:#555;'>Pond {pond_no}</div>"
+            f"{middle_html}"
+            "</div>"
+            f"{species_html}"
+            "</div>"
+        )
+
+    legend_html = (
+        "<div style='display:flex;gap:10px;flex-wrap:wrap;font-size:0.7rem;margin-bottom:4px;'>"
+        "<div><span style='display:inline-block;width:10px;height:10px;background:#eaf4ff;"
+        "border:1px solid #333;border-radius:2px;vertical-align:middle;margin-right:3px;'></span>Running</div>"
+        "<div><span style='display:inline-block;width:10px;height:10px;background:#fff3cd;"
+        "border:1px solid #333;border-radius:2px;vertical-align:middle;margin-right:3px;'></span>Partial H</div>"
+        "<div><span style='display:inline-block;width:10px;height:10px;background:#d4edda;"
+        "border:1px solid #333;border-radius:2px;vertical-align:middle;margin-right:3px;'></span>Full H</div>"
+        "</div>"
+    )
+
+    return (
+        "<div style='margin-top:6px;'>"
+        "<b>Pond Layout</b>"
+        f"{legend_html}"
+        f"<div style='display:flex;flex-wrap:wrap;max-height:220px;overflow-y:auto;'>{boxes_html}</div>"
+        "</div>"
+    )
+
+
 with st.spinner("Loading data..."):
     try:
         raw_locations = load_locations(LOCATIONS_CSV_URL)
@@ -139,10 +383,29 @@ with st.spinner("Loading data..."):
         )
         st.stop()
 
+# Pond data is loaded separately and failures here are non-fatal — the map
+# and feed-purchase details still work even if the WaterQualityData sheet
+# isn't reachable yet (e.g. the placeholder sheet ID above hasn't been
+# filled in), just without the Pond Layout section in the popups.
+pond_df = pd.DataFrame()
+pond_load_error = None
+try:
+    pond_df = load_pond_data(WATERQUALITY_CSV_URL)
+except Exception as e:
+    pond_load_error = str(e)
+
 if st.sidebar.button("🔄 Refresh data now"):
     load_locations.clear()
     load_sales_data.clear()
+    load_pond_data.clear()
     st.rerun()
+
+if pond_load_error:
+    st.sidebar.warning(
+        "⚠️ Pond Layout unavailable — could not load the WaterQualityData sheet. "
+        "Check WATERQUALITY_SHEET_ID/GID at the top of app.py and make sure that "
+        "sheet is shared as 'Anyone with the link — Viewer'."
+    )
 
 # ============================================================
 # CLEAN / PREPARE DATA
@@ -273,6 +536,12 @@ for _, row in filtered.iterrows():
     last_order = row.get("Last Order", "")
     last_order_html = last_order if isinstance(last_order, str) and last_order.strip() else "(no purchase on record)"
 
+    # NEW — Pond Layout for this farm, matched from the WaterQualityData
+    # sheet by Customer Name + Farm Name, appended below the existing
+    # feed-purchase info inside the click popup.
+    farm_pond_rows = match_pond_rows(pond_df, row["Customer Name"], row["Farm Name"])
+    pond_layout_html = build_pond_layout_html(farm_pond_rows)
+
     popup_html = f"""
         <b>{row['Customer Name']}</b><br>
         Farm: {row['Farm Name'] if row['Farm Name'] else '(none listed)'}<br>
@@ -280,6 +549,7 @@ for _, row in filtered.iterrows():
         Last Feed Purchase: {row.get('Last Feed Purchase Date', '-')}<br>
         Due in: {days_label} day(s)<br>
         Last Order: {last_order_html}
+        {pond_layout_html}
     """
 
     badge_html = f"""
@@ -301,7 +571,7 @@ for _, row in filtered.iterrows():
 
     folium.Marker(
         location=[row["lat"], row["lon"]],
-        popup=folium.Popup(popup_html, max_width=280),
+        popup=folium.Popup(popup_html, max_width=380),
         tooltip=folium.Tooltip(
             display_name,
             permanent=True,
