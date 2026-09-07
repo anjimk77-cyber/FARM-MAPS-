@@ -62,7 +62,7 @@ SALES_CSV_URL = (
 # sheet ID / gid below, and make sure that sheet is shared as
 # "Anyone with the link -> Viewer" — this app has no Google credentials,
 # so a private sheet will fail to load.
-WATERQUALITY_SHEET_ID = "PUT_YOUR_WATERQUALITYDATA_SHEET_ID_HERE"
+WATERQUALITY_SHEET_ID = "1ZRmAb9CymV3o7_D-c9KtzTefg60HvDesLD-TEK2AB2o"
 WATERQUALITY_GID = "0"
 WATERQUALITY_CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{WATERQUALITY_SHEET_ID}"
