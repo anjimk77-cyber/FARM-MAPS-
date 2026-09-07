@@ -121,9 +121,20 @@ def load_pond_data(url: str) -> pd.DataFrame:
         df = df[~is_harvest_hidden]
 
     # The sheet has no separate 'Customer Code' column — the code (e.g.
-    # "C00123") is the first 6 characters of 'Farm Name with Code'. Derive
-    # it once here so match_pond_rows() can link on it directly.
-    df["_DerivedCustomerCode"] = df["Farm Name with Code"].astype(str).str.strip().str[:6].str.upper()
+    # "C00123") lives at the start of 'Farm Name with Code'. Prefer a
+    # regex match for "letter + 5 digits" (handles any separator/spacing
+    # after it); fall back to the first 6 non-space characters if that
+    # pattern isn't found, so a slightly different code format still gets
+    # something to compare against instead of an empty string.
+    def _extract_customer_code(v):
+        s = str(v).strip()
+        m = re.match(r"^([A-Za-z]\s*\d{5})", s)
+        if m:
+            return re.sub(r"\s+", "", m.group(1)).upper()
+        compact = re.sub(r"\s+", "", s)
+        return compact[:6].upper()
+
+    df["_DerivedCustomerCode"] = df["Farm Name with Code"].apply(_extract_customer_code)
 
     return df.reset_index(drop=True)
 
@@ -256,13 +267,15 @@ def _species_letter(species):
 def match_pond_rows(pond_df: pd.DataFrame, customer_id: str, customer_name: str, farm_name: str) -> pd.DataFrame:
     """Matches a marker to its rows in the WaterQualityData sheet.
     Primary link: Customer ID (locations sheet) <-> the customer code
-    embedded in 'Farm Name with Code' — the first 6 characters, e.g.
-    'C00123' out of 'C00123 - Some Farm'. Falls back to the old Customer
-    Name / Farm Name matching only if that code doesn't match anything."""
+    embedded in 'Farm Name with Code' (see _extract_customer_code above).
+    Both sides are stripped of whitespace and upper-cased before
+    comparing, so formatting differences (spaces, case) don't break the
+    match. Falls back to the old Customer Name / Farm Name matching only
+    if the code doesn't match anything."""
     if pond_df.empty:
         return pond_df
 
-    code = str(customer_id).strip().upper()
+    code = re.sub(r"\s+", "", str(customer_id).strip()).upper()
     if code and "_DerivedCustomerCode" in pond_df.columns:
         code_matches = pond_df[pond_df["_DerivedCustomerCode"] == code]
         if not code_matches.empty:
@@ -435,6 +448,24 @@ df["Farm Name"] = df["Farm Name"].astype(str).str.strip()
 df.loc[df["Farm Name"].isin(["-", "nan", ""]), "Farm Name"] = ""
 
 df["Customer ID"] = df["Customer ID"].astype(str).str.strip()
+
+# Debug panel — since "No pond records found" can come from a Customer ID
+# / derived-code format mismatch that's hard to guess blind, this shows
+# the actual values being compared side by side so the mismatch is
+# visible directly. Safe to remove once matching is confirmed working.
+with st.sidebar.expander("🔧 Pond match debug"):
+    st.caption(f"Pond rows loaded: {len(pond_df)}")
+    if not pond_df.empty:
+        st.write("From WaterQualityData sheet:")
+        st.dataframe(
+            pond_df[["Customer", "Farm Name with Code", "_DerivedCustomerCode"]].drop_duplicates().head(10),
+            hide_index=True,
+        )
+    st.write("From locations sheet:")
+    st.dataframe(
+        df[["Customer ID", "Customer Name", "Farm Name"]].drop_duplicates().head(10),
+        hide_index=True,
+    )
 
 # Drop the old static columns from the locations sheet — these now come
 # from the sales log automatically instead.
