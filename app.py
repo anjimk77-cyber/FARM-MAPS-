@@ -147,6 +147,12 @@ def load_pond_data() -> pd.DataFrame:
         is_harvest_hidden = df["Harvest Status"].astype(str).str.strip().str.upper() == "H"
         df = df[~is_harvest_hidden]
 
+    # gspread returns numeric-looking cells as ints/floats and everything
+    # else as str, so this column can end up with a mixed dtype — which
+    # crashes pandas' sort/groupby (Pond Number is sorted/grouped on below
+    # in build_pond_layout_html). Force it to a consistent string type here.
+    df["Pond Number"] = df["Pond Number"].astype(str).str.strip()
+
     return df.reset_index(drop=True)
 
 
@@ -303,6 +309,7 @@ def build_pond_layout_html(farm_pond_df: pd.DataFrame) -> str:
 
     df = farm_pond_df.copy()
     df["_ParsedDate"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Pond Number"] = df["Pond Number"].astype(str).str.strip()
 
     # A pond keeps showing Partial H if ANY of its saved records ever had
     # a Partial harvest — not just its most recent row.
@@ -322,7 +329,21 @@ def build_pond_layout_html(farm_pond_df: pd.DataFrame) -> str:
         .sort_values("_ParsedDate")
         .groupby("Pond Number", as_index=False)
         .last()
-        .sort_values("Pond Number")
+    )
+
+    # Natural sort (Pond 2 before Pond 10) without relying on raw
+    # comparison of the Pond Number text — leading digits sort
+    # numerically, ties/non-numeric labels sort alphabetically after.
+    def _pond_number_sort_key(v):
+        s = str(v)
+        m = re.match(r"^(\d+)", s)
+        return (0, int(m.group(1)), s) if m else (1, 0, s)
+
+    pond_latest["_SortA"] = pond_latest["Pond Number"].map(lambda v: _pond_number_sort_key(v)[0])
+    pond_latest["_SortB"] = pond_latest["Pond Number"].map(lambda v: _pond_number_sort_key(v)[1])
+    pond_latest["_SortC"] = pond_latest["Pond Number"].map(lambda v: _pond_number_sort_key(v)[2])
+    pond_latest = pond_latest.sort_values(["_SortA", "_SortB", "_SortC"]).drop(
+        columns=["_SortA", "_SortB", "_SortC"]
     )
 
     if pond_latest.empty:
