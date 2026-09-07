@@ -1,5 +1,6 @@
-streamlit>=1.32
-folium>=0.15
-streamlit-folium>=0.18
-pandas>=2.0
-requests>=2.31
+streamlit
+pandas
+folium
+streamlit-folium
+gspread
+google-auth
