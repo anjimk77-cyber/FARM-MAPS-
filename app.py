@@ -523,6 +523,31 @@ df["polygon"] = parsed_locations.apply(lambda x: x[2])  # list[(lat, lon)] or No
 
 df = df.dropna(subset=["lat", "lon"])
 
+# ============================================================
+# PROVINCE FILTER — only show farms in North Western Province or
+# Eastern Province. The locations sheet has no province column, so this
+# is an approximate bounding-box filter based on each province's rough
+# lat/lon extent (Puttalam + Kurunegala districts for North Western;
+# Trincomalee + Batticaloa + Ampara districts for Eastern). Adjust
+# PROVINCE_BOUNDS below if a farm near a province edge is ever wrongly
+# included or excluded.
+PROVINCE_BOUNDS = {
+    "North Western": {"lat": (7.0, 8.9), "lon": (79.6, 80.6)},
+    "Eastern": {"lat": (6.0, 9.1), "lon": (81.0, 82.1)},
+}
+
+
+def _in_allowed_province(lat, lon):
+    for bounds in PROVINCE_BOUNDS.values():
+        lat_min, lat_max = bounds["lat"]
+        lon_min, lon_max = bounds["lon"]
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            return True
+    return False
+
+
+df = df[df.apply(lambda r: _in_allowed_province(r["lat"], r["lon"]), axis=1)].reset_index(drop=True)
+
 # Treat "-" or blank farm names as missing
 df["Farm Name"] = df["Farm Name"].astype(str).str.strip()
 df.loc[df["Farm Name"].isin(["-", "nan", ""]), "Farm Name"] = ""
@@ -567,32 +592,62 @@ df["Due date last Purchase"] = pd.to_numeric(
 # ============================================================
 st.sidebar.header("Filters")
 
-map_style = st.sidebar.selectbox(
-    "Map style",
-    ["Satellite", "OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"],
+# Customer Name -> Farm Name dropdown search. Farm Name only lists farms
+# belonging to whichever customer is currently selected. Nothing on the
+# map moves until "Search" is pressed; the last successful search stays
+# in effect (via session_state) across reruns until a new one is made.
+customer_names = sorted(df["Customer Name"].dropna().astype(str).unique().tolist())
+selected_customer = st.sidebar.selectbox(
+    "Customer Name", ["-- Select customer --"] + customer_names
 )
 
-search = st.sidebar.text_input("Search customer / farm / ID")
+if selected_customer != "-- Select customer --":
+    customer_farm_names = sorted(
+        df.loc[df["Customer Name"] == selected_customer, "Farm Name"]
+        .replace("", "(none listed)")
+        .unique()
+        .tolist()
+    )
+else:
+    customer_farm_names = []
+
+selected_farm = st.sidebar.selectbox(
+    "Farm Name",
+    customer_farm_names if customer_farm_names else ["-- Select customer first --"],
+)
+
+search_clicked = st.sidebar.button("🔍 Search")
+
+if "focus_customer" not in st.session_state:
+    st.session_state.focus_customer = None
+    st.session_state.focus_farm = None
+
+valid_selection = (
+    selected_customer != "-- Select customer --"
+    and selected_farm not in (None, "-- Select customer first --")
+)
+if search_clicked and valid_selection:
+    st.session_state.focus_customer = selected_customer
+    st.session_state.focus_farm = selected_farm
 
 filtered = df.copy()  # always show all farms — search only moves the map
 
 search_matches = pd.DataFrame()
-if search.strip():
-    s = search.strip().lower()
-    mask = (
-        filtered["Customer Name"].astype(str).str.lower().str.contains(s)
-        | filtered["Farm Name"].astype(str).str.lower().str.contains(s)
-        | filtered["Customer ID"].astype(str).str.lower().str.contains(s)
-    )
+if st.session_state.focus_customer:
+    mask = filtered["Customer Name"] == st.session_state.focus_customer
+    farm_val = st.session_state.focus_farm
+    if farm_val and farm_val != "(none listed)":
+        mask &= filtered["Farm Name"] == farm_val
+    else:
+        mask &= filtered["Farm Name"] == ""
     search_matches = filtered[mask]
     if search_matches.empty:
         st.sidebar.warning("No match found.")
     elif len(search_matches) == 1:
-        st.sidebar.success("Found 1 match — map zoomed to it.")
+        st.sidebar.success("Zoomed to the selected farm.")
     else:
         st.sidebar.success(
-            f"Found {len(search_matches)} matches — map zoomed to the first: "
-            f"{search_matches.iloc[0]['Customer Name']}."
+            f"Found {len(search_matches)} matching farms — map zoomed to the first."
         )
 
 st.sidebar.caption(f"Showing {len(filtered)} of {len(df)} farms")
@@ -611,24 +666,22 @@ if not focus_df.empty:
 else:
     center_lat, center_lon = 7.8731, 80.7718  # fallback: center of Sri Lanka
 
-if map_style == "Satellite":
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=None)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri, Maxar, Earthstar Geographics",
-        name="Satellite",
-        overlay=False,
-        control=False,
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri",
-        name="Labels",
-        overlay=True,
-        control=False,
-    ).add_to(m)
-else:
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=map_style)
+# Satellite is now the only map style.
+m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=None)
+folium.TileLayer(
+    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attr="Esri, Maxar, Earthstar Geographics",
+    name="Satellite",
+    overlay=False,
+    control=False,
+).add_to(m)
+folium.TileLayer(
+    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    attr="Esri",
+    name="Labels",
+    overlay=True,
+    control=False,
+).add_to(m)
 
 if len(focus_df) > 1:
     bounds = focus_df[["lat", "lon"]].values.tolist()
