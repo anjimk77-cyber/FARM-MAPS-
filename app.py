@@ -17,6 +17,15 @@ including HOW the data is fetched: WaterQualityData is a private sheet,
 so (like the manager app) this reads it via gspread + a Google service
 account, not a public CSV link.
 
+FIX: the Location column can contain either a plain "lat, lon" string
+OR a WKT polygon string like:
+    Polygon ((79.7936916 7.552099, 79.7937131 7.5515672, ...))
+The old parser only understood "lat, lon" and silently dropped any farm
+whose Location was a polygon. parse_location() now handles both: for a
+polygon it computes the centroid (for marker placement) AND returns the
+ring itself so the farm boundary can be drawn on the map. The boundary
+is clickable and shares the exact same popup as the marker.
+
 Local run:
     pip install -r requirements.txt
     streamlit run app.py
@@ -156,14 +165,49 @@ def load_pond_data() -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def parse_lat_lon(location: str):
-    """Split a 'lat, lon' string into two floats. Returns (None, None) if invalid."""
+def parse_location(location: str):
+    """
+    Parses the Location cell in either of two formats:
+      - "lat, lon"                                    -> plain point
+      - "Polygon ((lon lat, lon lat, ...))"            -> WKT polygon ring
+
+    Returns (lat, lon, polygon_points):
+      - lat, lon: the point (or polygon centroid) to place the marker/
+        badge at, or (None, None) if the value can't be parsed at all.
+      - polygon_points: list of (lat, lon) tuples for the ring, in the
+        order given, if the value was a WKT polygon; otherwise None.
+    """
     if not isinstance(location, str):
-        return None, None
+        return None, None, None
+    location = location.strip()
+
+    if location.lower().startswith("polygon"):
+        coords_match = re.search(r"\(\(([^)]+)\)\)", location)
+        if not coords_match:
+            return None, None, None
+
+        points = []  # (lat, lon) — WKT gives "lon lat", so we swap
+        for pair in coords_match.group(1).split(","):
+            parts = pair.strip().split()
+            if len(parts) != 2:
+                continue
+            try:
+                lon, lat = float(parts[0]), float(parts[1])
+                points.append((lat, lon))
+            except ValueError:
+                continue
+
+        if not points:
+            return None, None, None
+
+        avg_lat = sum(p[0] for p in points) / len(points)
+        avg_lon = sum(p[1] for p in points) / len(points)
+        return avg_lat, avg_lon, points
+
     match = re.match(r"\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*", location)
     if not match:
-        return None, None
-    return float(match.group(1)), float(match.group(2))
+        return None, None, None
+    return float(match.group(1)), float(match.group(2)), None
 
 
 def due_color(days):
@@ -214,7 +258,7 @@ def build_feed_report(sales: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# NEW — POND LAYOUT (ported from the manager app's Pond Layout section)
+# POND LAYOUT (ported from the manager app's Pond Layout section)
 # ============================================================
 def _escape_html_pond(v):
     return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -432,7 +476,6 @@ with st.spinner("Loading data..."):
         )
         st.stop()
 
-# Pond data is loaded separately and failures here are non-fatal — the map
 # Pond data is loaded separately (via gspread + service account, since
 # WaterQualityData is private) and failures here are non-fatal — the map
 # and feed-purchase details still work even if secrets aren't configured
@@ -472,9 +515,10 @@ elif pond_load_error:
 # ============================================================
 df = raw_locations.copy()
 
-lat_lon = df["Location"].apply(parse_lat_lon)
-df["lat"] = lat_lon.apply(lambda x: x[0])
-df["lon"] = lat_lon.apply(lambda x: x[1])
+parsed_locations = df["Location"].apply(parse_location)
+df["lat"] = parsed_locations.apply(lambda x: x[0])
+df["lon"] = parsed_locations.apply(lambda x: x[1])
+df["polygon"] = parsed_locations.apply(lambda x: x[2])  # list[(lat, lon)] or None
 
 df = df.dropna(subset=["lat", "lon"])
 
@@ -614,9 +658,9 @@ for _, row in filtered.iterrows():
     last_order = row.get("Last Order", "")
     last_order_html = last_order if isinstance(last_order, str) and last_order.strip() else "(no purchase on record)"
 
-    # NEW — Pond Layout for this farm, matched from the WaterQualityData
-    # sheet by Customer Name + Farm Name, appended below the existing
-    # feed-purchase info inside the click popup.
+    # Pond Layout for this farm, matched from the WaterQualityData sheet
+    # by Customer Name + Farm Name, appended below the existing
+    # feed-purchase info inside the popup.
     farm_pond_rows = match_pond_rows(pond_df, row["Customer Name"], row["Farm Name"])
     pond_layout_html = build_pond_layout_html(farm_pond_rows)
 
@@ -665,6 +709,22 @@ for _, row in filtered.iterrows():
         icon=folium.DivIcon(html=badge_html, icon_size=(34, 34), icon_anchor=(17, 17)),
         z_index_offset=1000,
     ).add_to(m)
+
+    # NEW — if this farm's Location was a WKT polygon, draw the actual
+    # boundary too. It reuses the exact same popup_html as the marker
+    # (each layer needs its own folium.Popup *instance*, but the HTML
+    # content is identical) so clicking anywhere on the outline pops up
+    # the same feed-purchase + pond-layout info as clicking the badge.
+    if row["polygon"]:
+        folium.Polygon(
+            locations=row["polygon"],
+            color="#3388ff",
+            weight=2,
+            fill=True,
+            fill_opacity=0.12,
+            popup=folium.Popup(popup_html, max_width=380),
+            tooltip=display_name,
+        ).add_to(m)
 
 st_folium(m, width=None, height=900, use_container_width=True)
 
