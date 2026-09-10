@@ -50,6 +50,7 @@ import pandas as pd
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+import streamlit.components.v1 as components
 from datetime import date
 
 import gspread
@@ -735,19 +736,17 @@ for _, row in filtered.iterrows():
             tooltip=display_name,
         ).add_to(m)
 
-st_folium(
-    m,
-    width=None,
-    height=900,
-    use_container_width=True,
-    # Panning/zooming the map returns new bounds/center/zoom to Streamlit,
-    # and since the app never reads that return value, every one of those
-    # updates was still triggering a full script rerun (rebuilding every
-    # marker/polygon from scratch) — that's the pan/zoom lag. Since we
-    # don't use any of the returned interaction data, tell the component
-    # not to send it back, so panning/zooming stays purely client-side.
-    returned_objects=[],
-)
+# st_folium is a *bidirectional* component — even with returned_objects=[],
+# Leaflet still reports back to Streamlit on every pan/zoom, and that
+# report is what was triggering the full-script rerun (the "running"
+# spinner + white flash while everything redraws). The app never reads
+# that returned value, so render the map as a plain static HTML embed
+# instead: no channel back to Python at all, so pan/zoom is handled
+# entirely client-side and can never trigger a Streamlit rerun. Popups,
+# tooltips, and the satellite/labels layers all still work exactly the
+# same, since those are rendered by Leaflet in the browser either way.
+map_html = folium.Figure().add_child(m).render()
+components.html(map_html, height=910, width=None)
 
 st.caption(
     ""
