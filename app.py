@@ -633,8 +633,17 @@ if len(focus_df) > 1:
     bounds = focus_df[["lat", "lon"]].values.tolist()
     m.fit_bounds(bounds, padding=(40, 40))
 elif len(focus_df) == 1:
-    m.location = [focus_df.iloc[0]["lat"], focus_df.iloc[0]["lon"]]
-    m.options["zoom"] = 17
+    single_row = focus_df.iloc[0]
+    if single_row["polygon"]:
+        # This farm's boundary can be much smaller than a flat zoom=17
+        # view (e.g. a ~100m pond), which made it effectively invisible
+        # — a couple of pixels lost in the basemap. Fit the map to the
+        # polygon's own corners instead so it's always clearly framed,
+        # regardless of how small or large the actual boundary is.
+        m.fit_bounds(single_row["polygon"], padding=(60, 60))
+    else:
+        m.location = [single_row["lat"], single_row["lon"]]
+        m.options["zoom"] = 17
 
 # By default Leaflet renders tooltips above markers, so a nearby farm's
 # name label can cover another farm's badge. Swap the stacking order so
@@ -719,9 +728,9 @@ for _, row in filtered.iterrows():
         folium.Polygon(
             locations=row["polygon"],
             color="#3388ff",
-            weight=2,
+            weight=3,
             fill=True,
-            fill_opacity=0.12,
+            fill_opacity=0.25,
             popup=folium.Popup(popup_html, max_width=380),
             tooltip=display_name,
         ).add_to(m)
