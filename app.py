@@ -735,7 +735,19 @@ for _, row in filtered.iterrows():
             tooltip=display_name,
         ).add_to(m)
 
-st_folium(m, width=None, height=900, use_container_width=True)
+st_folium(
+    m,
+    width=None,
+    height=900,
+    use_container_width=True,
+    # Panning/zooming the map returns new bounds/center/zoom to Streamlit,
+    # and since the app never reads that return value, every one of those
+    # updates was still triggering a full script rerun (rebuilding every
+    # marker/polygon from scratch) — that's the pan/zoom lag. Since we
+    # don't use any of the returned interaction data, tell the component
+    # not to send it back, so panning/zooming stays purely client-side.
+    returned_objects=[],
+)
 
 st.caption(
     ""
