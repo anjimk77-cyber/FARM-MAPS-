@@ -867,6 +867,24 @@ for _, urow in user_loc_df.iterrows():
         Last updated: {last_updated}
     """
 
+    # Small red circle with a person icon inside — matches the farm
+    # badges' circular style instead of a big teardrop pin.
+    user_badge_html = """
+        <div style="
+            background-color:#cc0000;
+            color:white;
+            border-radius:50%;
+            width:26px;
+            height:26px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            font-size:14px;
+            border:2px solid white;
+            box-shadow:0 0 4px rgba(0,0,0,0.4);
+        ">👤</div>
+    """
+
     folium.Marker(
         location=[urow["Latitude"], urow["Longitude"]],
         popup=folium.Popup(user_popup_html, max_width=260),
@@ -882,7 +900,7 @@ for _, urow in user_loc_df.iterrows():
                 "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
             ),
         ),
-        icon=folium.Icon(color="red", icon="user", prefix="fa"),
+        icon=folium.DivIcon(html=user_badge_html, icon_size=(26, 26), icon_anchor=(13, 13)),
         z_index_offset=1100,
     ).add_to(m)
 
