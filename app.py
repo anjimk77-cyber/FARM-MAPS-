@@ -26,6 +26,15 @@ polygon it computes the centroid (for marker placement) AND returns the
 ring itself so the farm boundary can be drawn on the map. The boundary
 is clickable and shares the exact same popup as the marker.
 
+NEW: also pulls saved user locations (Name / Latitude / Longitude /
+Last Updated) from the "UserLocations" worksheet — the same one written
+to by the standalone user_location_app.py "Save Location" app — and
+plots one marker per user, with their name and last-updated date in the
+popup. This uses the exact same private-sheet spreadsheet/credentials
+as the Pond Layout feature above (gspread + service account), just a
+different worksheet tab. This section is purely additive: it does not
+change any farm-location, feed-report, or pond-layout logic above.
+
 Local run:
     pip install -r requirements.txt
     streamlit run app.py
@@ -83,6 +92,10 @@ SALES_CSV_URL = (
 # st.secrets["gcp_service_account"] and st.secrets["gsheet"]["sheet_id"].
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 WATERQUALITY_WORKSHEET_NAME_DEFAULT = "WaterQualityData"
+
+# NEW — saved user locations, written by the separate "Save Location" app
+# (user_location_app.py) into a worksheet tab in this SAME spreadsheet.
+USERLOC_WORKSHEET_NAME = "UserLocations"
 
 FEED_PREFIX = "FEED"  # Item No. prefix that identifies "feed" items
 
@@ -164,6 +177,34 @@ def load_pond_data() -> pd.DataFrame:
     df["Pond Number"] = df["Pond Number"].astype(str).str.strip()
 
     return df.reset_index(drop=True)
+
+
+# ============================================================
+# NEW — saved user locations (Name / Latitude / Longitude / Last Updated)
+# Read-only here: this app never writes to this tab, only displays it.
+# Purely additive — does not affect any function or data above.
+# ============================================================
+@st.cache_resource(show_spinner=False)
+def get_userloc_worksheet():
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    sheet_id = st.secrets["gsheet"]["sheet_id"]
+    sh = client.open_by_key(sheet_id)
+    return sh.worksheet(USERLOC_WORKSHEET_NAME)
+
+
+@st.cache_data(ttl=60, show_spinner="Loading saved user locations...")
+def load_user_locations() -> pd.DataFrame:
+    ws = get_userloc_worksheet()
+    records = ws.get_all_records()
+    df = pd.DataFrame(records)
+    if df.empty:
+        return pd.DataFrame(columns=["Name", "Latitude", "Longitude", "Last Updated"])
+    df.columns = [c.strip() for c in df.columns]
+    df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
+    df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
+    return df.dropna(subset=["Latitude", "Longitude"])
 
 
 def parse_location(location: str):
@@ -491,10 +532,25 @@ if _gsheet_configured():
 else:
     pond_load_error = "not_configured"
 
+# NEW — saved user locations, loaded the same non-fatal way as pond data.
+# If the "UserLocations" tab doesn't exist yet (nobody has saved a
+# location with user_location_app.py yet), this is treated the same as
+# "no user locations to show" rather than an error.
+user_loc_df = pd.DataFrame()
+user_loc_load_error = None
+if _gsheet_configured():
+    try:
+        user_loc_df = load_user_locations()
+    except gspread.exceptions.WorksheetNotFound:
+        user_loc_df = pd.DataFrame()
+    except Exception as e:
+        user_loc_load_error = str(e)
+
 if st.sidebar.button("🔄 Refresh data now"):
     load_locations.clear()
     load_sales_data.clear()
     load_pond_data.clear()
+    load_user_locations.clear()
     st.rerun()
 
 if pond_load_error == "not_configured":
@@ -509,6 +565,12 @@ elif pond_load_error:
         f"⚠️ Pond Layout unavailable — could not load the WaterQualityData "
         f"sheet. Check your `[gsheet]` secrets and that the sheet is shared "
         f"with the service account.\n\nDetails: {pond_load_error}"
+    )
+
+if user_loc_load_error:
+    st.sidebar.warning(
+        f"⚠️ Saved user locations unavailable — could not load the "
+        f"UserLocations sheet.\n\nDetails: {user_loc_load_error}"
     )
 
 # ============================================================
@@ -788,6 +850,41 @@ for _, row in filtered.iterrows():
             popup=folium.Popup(popup_html, max_width=380),
             tooltip=display_name,
         ).add_to(m)
+
+# ============================================================
+# NEW — saved user locations, one marker per user (distinct red pin),
+# showing their name and last-updated (saved) date in the popup. This
+# is purely additive: it runs after all existing farm markers/polygons
+# are added above and does not alter any of that logic.
+# ============================================================
+for _, urow in user_loc_df.iterrows():
+    user_name = str(urow.get("Name", "")).strip()
+    last_updated = str(urow.get("Last Updated", "")).strip() or "-"
+
+    user_popup_html = f"""
+        <b>{user_name}</b><br>
+        Saved location<br>
+        Last updated: {last_updated}
+    """
+
+    folium.Marker(
+        location=[urow["Latitude"], urow["Longitude"]],
+        popup=folium.Popup(user_popup_html, max_width=260),
+        tooltip=folium.Tooltip(
+            f"{user_name} (saved {last_updated})",
+            permanent=True,
+            direction="top",
+            offset=(0, -8),
+            style=(
+                "font-size:12px; font-weight:600; padding:2px 6px; "
+                "white-space:nowrap; background:#fff0f0; "
+                "border:1px solid #cc0000; border-radius:4px; "
+                "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
+            ),
+        ),
+        icon=folium.Icon(color="red", icon="user", prefix="fa"),
+        z_index_offset=1100,
+    ).add_to(m)
 
 # st_folium is a *bidirectional* component — even with returned_objects=[],
 # Leaflet still reports back to Streamlit on every pan/zoom, and that
