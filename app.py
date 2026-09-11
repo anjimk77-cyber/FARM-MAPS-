@@ -105,7 +105,7 @@ USERLOC_WORKSHEET_NAME = "UserLocations"
 # Any name NOT listed here still falls back to the small red circular
 # person icon, so this is fully optional per user.
 USER_ICON_URLS = {
-    # "Kasun Perera": "https://example.com/photos/kasun.jpg",
+    "Anjitha": "https://img.magnific.com/free-photo/young-bearded-man-with-striped-shirt_273609-5677.jpg",
     # "Amal Silva": "https://example.com/photos/amal.jpg",
 }
 
