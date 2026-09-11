@@ -106,7 +106,7 @@ USERLOC_WORKSHEET_NAME = "UserLocations"
 # person icon, so this is fully optional per user.
 USER_ICON_URLS = {
     "Anjitha": "https://img.magnific.com/free-photo/young-bearded-man-with-striped-shirt_273609-5677.jpg",
-    # "Amal Silva": "https://example.com/photos/amal.jpg",
+    "Nethusha": "https://img.magnific.com/free-photo/young-bearded-man-with-striped-shirt_273609-5677.jpg",
 }
 
 FEED_PREFIX = "FEED"  # Item No. prefix that identifies "feed" items
