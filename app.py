@@ -97,6 +97,18 @@ WATERQUALITY_WORKSHEET_NAME_DEFAULT = "WaterQualityData"
 # (user_location_app.py) into a worksheet tab in this SAME spreadsheet.
 USERLOC_WORKSHEET_NAME = "UserLocations"
 
+# NEW — optional per-person profile image shown on the map instead of the
+# generic person icon. Add an entry here for each name you want a custom
+# photo for: "Exact Name As Saved": "direct image URL" (must end in
+# something like .jpg/.png, or be a direct-view link, e.g. a Google Drive
+# share link converted to "https://drive.google.com/uc?export=view&id=...").
+# Any name NOT listed here still falls back to the small red circular
+# person icon, so this is fully optional per user.
+USER_ICON_URLS = {
+    # "Kasun Perera": "https://example.com/photos/kasun.jpg",
+    # "Amal Silva": "https://example.com/photos/amal.jpg",
+}
+
 FEED_PREFIX = "FEED"  # Item No. prefix that identifies "feed" items
 
 st.set_page_config(page_title="Farm Map", page_icon="🦐", layout="wide")
@@ -867,23 +879,44 @@ for _, urow in user_loc_df.iterrows():
         Last updated: {last_updated}
     """
 
-    # Small red circle with a person icon inside — matches the farm
-    # badges' circular style instead of a big teardrop pin.
-    user_badge_html = """
-        <div style="
-            background-color:#cc0000;
-            color:white;
-            border-radius:50%;
-            width:26px;
-            height:26px;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            font-size:14px;
-            border:2px solid white;
-            box-shadow:0 0 4px rgba(0,0,0,0.4);
-        ">👤</div>
-    """
+    # If this name has a custom photo assigned in USER_ICON_URLS, show a
+    # small circular badge of that image instead of the generic person
+    # icon. Otherwise fall back to the red circle + person icon as before.
+    image_url = USER_ICON_URLS.get(user_name)
+    if image_url:
+        user_badge_html = f"""
+            <div style="
+                width:32px;
+                height:32px;
+                border-radius:50%;
+                border:2px solid #cc0000;
+                box-shadow:0 0 4px rgba(0,0,0,0.4);
+                overflow:hidden;
+                background:white;
+            ">
+                <img src="{image_url}" style="width:100%;height:100%;object-fit:cover;" />
+            </div>
+        """
+        icon_size = (32, 32)
+        icon_anchor = (16, 16)
+    else:
+        user_badge_html = """
+            <div style="
+                background-color:#cc0000;
+                color:white;
+                border-radius:50%;
+                width:26px;
+                height:26px;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                font-size:14px;
+                border:2px solid white;
+                box-shadow:0 0 4px rgba(0,0,0,0.4);
+            ">👤</div>
+        """
+        icon_size = (26, 26)
+        icon_anchor = (13, 13)
 
     folium.Marker(
         location=[urow["Latitude"], urow["Longitude"]],
@@ -900,7 +933,7 @@ for _, urow in user_loc_df.iterrows():
                 "box-shadow:0 1px 3px rgba(0,0,0,0.4); z-index:9999;"
             ),
         ),
-        icon=folium.DivIcon(html=user_badge_html, icon_size=(26, 26), icon_anchor=(13, 13)),
+        icon=folium.DivIcon(html=user_badge_html, icon_size=icon_size, icon_anchor=icon_anchor),
         z_index_offset=1100,
     ).add_to(m)
 
