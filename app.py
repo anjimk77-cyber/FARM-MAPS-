@@ -35,6 +35,16 @@ as the Pond Layout feature above (gspread + service account), just a
 different worksheet tab. This section is purely additive: it does not
 change any farm-location, feed-report, or pond-layout logic above.
 
+FIX (pond matching): pond rows are now matched to a farm by comparing
+the leading code in WaterQualityData's "Farm Name with Code" column
+(e.g. "C00099" in "C00099 - Silva Farm") against the Locations sheet's
+"Customer ID" column, instead of matching on Customer Name / Farm Name
+text. The old text-based match silently failed whenever the two sheets
+spelled a customer or farm name slightly differently (typos, apostrophes,
+extra spaces, nicknames), which is why some customers with real
+WaterQualityData rows were showing no Pond Layout on the map. Matching
+on the ID code avoids that entirely.
+
 Local run:
     pip install -r requirements.txt
     streamlit run app.py
@@ -187,6 +197,22 @@ def load_pond_data() -> pd.DataFrame:
     # crashes pandas' sort/groupby (Pond Number is sorted/grouped on below
     # in build_pond_layout_html). Force it to a consistent string type here.
     df["Pond Number"] = df["Pond Number"].astype(str).str.strip()
+
+    # NEW — extract the leading code from "Farm Name with Code" (e.g.
+    # "C00099" out of "C00099 - Silva Farm") once, up front, so every
+    # farm's rows can be matched against the Locations sheet's
+    # Customer ID column cheaply and consistently. Takes everything up
+    # to the first non-alphanumeric character (space/dash/colon/etc.),
+    # rather than a fixed character count, so it still works if the code
+    # length ever varies.
+    df["_FarmCode"] = (
+        df["Farm Name with Code"]
+        .astype(str)
+        .str.strip()
+        .str.extract(r"^([A-Za-z0-9]+)")[0]
+        .fillna("")
+        .str.upper()
+    )
 
     return df.reset_index(drop=True)
 
@@ -379,24 +405,23 @@ def _species_letter(species):
     return ""
 
 
-def match_pond_rows(pond_df: pd.DataFrame, customer_name: str, farm_name: str) -> pd.DataFrame:
-    """Matches the locations sheet's Customer Name / Farm Name to the
-    WaterQualityData sheet's Customer / Farm Name with Code columns —
-    same fields the manager app filters on. Customer is matched exactly
-    (case-insensitive, trimmed); farm is matched as a substring, since
-    'Farm Name with Code' usually has an extra code appended after the
-    plain farm name."""
+def match_pond_rows(pond_df: pd.DataFrame, customer_id: str) -> pd.DataFrame:
+    """Matches a farm's pond rows in WaterQualityData by comparing the
+    leading code extracted from 'Farm Name with Code' (e.g. 'C00099' out
+    of 'C00099 - Silva Farm', stored in pond_df['_FarmCode'] by
+    load_pond_data()) against the Locations sheet's Customer ID column.
+
+    Replaces the old Customer Name / Farm Name text matching, which
+    silently failed whenever the two sheets spelled a name slightly
+    differently (typos, apostrophes, extra spaces, nicknames) — even
+    though the farm clearly had WaterQualityData rows.
+    """
     if pond_df.empty:
         return pond_df
-    cust = str(customer_name).strip().lower()
-    farm = str(farm_name).strip().lower()
-    mask_cust = pond_df["Customer"].astype(str).str.strip().str.lower() == cust
-    if not farm:
-        return pond_df[mask_cust]
-    mask_farm = pond_df["Farm Name with Code"].astype(str).str.strip().str.lower().str.contains(
-        re.escape(farm), na=False
-    )
-    return pond_df[mask_cust & mask_farm]
+    cust_id = str(customer_id).strip().upper()
+    if not cust_id:
+        return pond_df.iloc[0:0]
+    return pond_df[pond_df["_FarmCode"] == cust_id]
 
 
 def build_pond_layout_html(farm_pond_df: pd.DataFrame) -> str:
@@ -628,21 +653,21 @@ df.loc[df["Farm Name"].isin(["-", "nan", ""]), "Farm Name"] = ""
 
 df["Customer ID"] = df["Customer ID"].astype(str).str.strip()
 
-# Debug panel — since "No pond records found" can come from a Customer
-# Name / Farm Name mismatch that's hard to guess blind, this shows the
-# actual values being compared side by side. Safe to remove once matching
-# is confirmed working.
+# Debug panel — shows the extracted WaterQualityData code side by side
+# with the Locations sheet's Customer ID, since a mismatch here is what
+# causes "No pond records found" for a farm that clearly has
+# WaterQualityData rows. Safe to remove once matching is confirmed
+# working across all customers.
 with st.sidebar.expander("🔧 Pond match debug"):
     st.caption(f"Pond rows loaded: {len(pond_df)}")
     if not pond_df.empty:
+        debug_pond = pond_df[["Customer", "Farm Name with Code", "_FarmCode"]].drop_duplicates().head(15).copy()
+        debug_pond = debug_pond.rename(columns={"_FarmCode": "Extracted Code"})
         st.write("From WaterQualityData sheet:")
-        st.dataframe(
-            pond_df[["Customer", "Farm Name with Code"]].drop_duplicates().head(10),
-            hide_index=True,
-        )
+        st.dataframe(debug_pond, hide_index=True)
     st.write("From locations sheet:")
     st.dataframe(
-        df[["Customer ID", "Customer Name", "Farm Name"]].drop_duplicates().head(10),
+        df[["Customer ID", "Customer Name", "Farm Name"]].drop_duplicates().head(15),
         hide_index=True,
     )
 
@@ -796,9 +821,10 @@ for _, row in filtered.iterrows():
     last_order_html = last_order if isinstance(last_order, str) and last_order.strip() else "(no purchase on record)"
 
     # Pond Layout for this farm, matched from the WaterQualityData sheet
-    # by Customer Name + Farm Name, appended below the existing
-    # feed-purchase info inside the popup.
-    farm_pond_rows = match_pond_rows(pond_df, row["Customer Name"], row["Farm Name"])
+    # by Customer ID <-> the leading code in "Farm Name with Code"
+    # (e.g. "C00099"), appended below the existing feed-purchase info
+    # inside the popup.
+    farm_pond_rows = match_pond_rows(pond_df, row["Customer ID"])
     pond_layout_html = build_pond_layout_html(farm_pond_rows)
 
     popup_html = f"""
